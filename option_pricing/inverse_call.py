@@ -1,4 +1,8 @@
-"""Inverse-call pricing and implied-volatility recovery with Brent's method."""
+"""Расчёт цены обратного call-опциона и восстановление волатильности методом Брента.
+
+Цена выражена в BTC, волатильность — в долях, срок — в годах.
+Используется форвард F: C = N(d1) - (K/F) N(d2), без отдельного дисконтирования.
+"""
 
 import math
 from dataclasses import dataclass
@@ -10,8 +14,6 @@ __all__ = ["BrentConfig", "IVResult", "implied_volatility", "inverse_call_price"
 
 @dataclass(frozen=True, slots=True)
 class BrentConfig:
-    """Bracket and convergence settings for the volatility search."""
-
     low: float = 1e-8
     high: float = 10.0
     xtol: float = 1e-10
@@ -34,8 +36,6 @@ class BrentConfig:
 
 @dataclass(frozen=True, slots=True)
 class IVResult:
-    """Outcome of one implied-volatility solve."""
-
     iv: float | None
     price_error: float | None
     iterations: int
@@ -45,16 +45,10 @@ class IVResult:
 
 
 def _normal_cdf(value: float) -> float:
-    """Standard normal CDF from the complementary error function."""
     return 0.5 * math.erfc(-value / math.sqrt(2.0))
 
 
 def inverse_call_price(forward: float, strike: float, time_to_expiry: float, volatility: float) -> float:
-    """Return the BTC premium of a Deribit inverse call under Black-Scholes.
-
-    The model uses the expiry forward ``F`` directly, so no separate discount
-    rate is applied: ``C = N(d1) - (K/F) N(d2)``.
-    """
     values = (forward, strike, time_to_expiry, volatility)
     if not all(math.isfinite(value) for value in values):
         raise ValueError("forward, strike, time_to_expiry, and volatility must be finite")
@@ -92,12 +86,6 @@ def implied_volatility(
     time_to_expiry: float,
     config: BrentConfig | None = None,
 ) -> IVResult:
-    """Solve ``inverse_call_price(..., sigma) == mid_price`` for sigma.
-
-    The caller is expected to pass a quote inside the no-arbitrage interval
-    ``max(1 - K/F, 0) < mid < 1``. Invalid or unsolvable quotes are returned
-    with an explicit ``reason`` instead of raising.
-    """
     config = config or BrentConfig()
     if not all(math.isfinite(value) for value in (mid_price, forward, strike, time_to_expiry)):
         raise ValueError("mid_price, forward, strike, and time_to_expiry must be finite")
@@ -108,11 +96,11 @@ def implied_volatility(
     if not intrinsic < mid_price < 1.0:
         return _failure("outside_model_bounds")
 
-    def objective(volatility: float) -> float:
+    def price_difference(volatility: float) -> float:
         return inverse_call_price(forward, strike, time_to_expiry, volatility) - mid_price
 
     low, high = config.low, config.high
-    f_low, f_high = objective(low), objective(high)
+    f_low, f_high = price_difference(low), price_difference(high)
     if f_low == 0:
         return IVResult(iv=low, price_error=0.0, iterations=0, function_calls=0, converged=True)
     if f_high == 0:
@@ -122,7 +110,7 @@ def implied_volatility(
 
     try:
         root, details = brentq(
-            objective,
+            price_difference,
             low,
             high,
             xtol=config.xtol,
@@ -138,7 +126,7 @@ def implied_volatility(
     except RuntimeError:
         return _failure("solver_error")
 
-    price_error = abs(objective(root))
+    price_error = abs(price_difference(root))
     result = IVResult(
         iv=float(root),
         price_error=price_error,

@@ -5,6 +5,9 @@ description = "Deribit market data for BTC inverse option price intervals"
 requires-python = ">=3.10"
 dependencies = ["scipy>=1.15"]
 
+[tool.setuptools.packages.find]
+include = ["deribit_data*", "option_pricing*"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"

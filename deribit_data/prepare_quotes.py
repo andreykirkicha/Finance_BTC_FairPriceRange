@@ -1,4 +1,4 @@
-"""Prepare the fixed research period's BTC call quotes from a historical SQL dump."""
+"""Подготовка котировок BTC call за выбранный период из исторического SQL-дампа."""
 
 import argparse
 import csv
@@ -21,18 +21,18 @@ __all__ = [
     "parse_expiry_utc",
     "parse_utc",
     "prepare_quotes",
-    "scan_options_table",
+    "read_option_snapshot",
     "timestamp_key",
-    "write_table",
+    "write_csv",
 ]
 
 DERIBIT_EXPIRY_HOUR_UTC = 8
 START_DATE = date(2024, 5, 20)
-END_DATE = date(2024, 6, 3)  # Exclusive UTC boundary.
+END_DATE = date(2024, 6, 3)
 EXPIRY_DATE = date(2024, 7, 26)
 MAX_LOG_MONEYNESS = 0.15
 MAX_RELATIVE_SPREAD = 0.20
-FIELDS = (
+QUOTE_FIELDS = (
     "timestamp_utc",
     "instrument_name",
     "expiry_utc",
@@ -49,8 +49,6 @@ FIELDS = (
 
 @dataclass(frozen=True, slots=True)
 class DatasetStats:
-    """Counts collected while scanning the whole options table once."""
-
     table: str
     total_rows: int
     btc_rows: int
@@ -65,8 +63,6 @@ class DatasetStats:
 
 @dataclass(frozen=True, slots=True)
 class OptionRow:
-    """One raw option row from the dump, with numeric fields already parsed."""
-
     instrument_name: str
     option_type: str
     expiry_raw: str
@@ -88,30 +84,22 @@ class OptionRow:
 
 @dataclass(frozen=True, slots=True)
 class ScanResult:
-    """Rows for the selected snapshot plus whole-table statistics."""
-
     stats: DatasetStats
     rows: tuple[OptionRow, ...]
     snapshot: datetime | None
 
 
 def timestamp_key(raw: str) -> tuple[str, str]:
-    """Return a sortable key without parsing every timestamp in the dump.
-
-    PostgreSQL may print fractional seconds with a variable number of digits;
-    pad them to microseconds so string order and numeric order agree.
-    """
+    # Дополнение до микросекунд сохраняет порядок времени при сравнении строк.
     base, separator, fraction = raw.strip().partition(".")
     return base, (fraction + "000000")[:6] if separator else "000000"
 
 
 def parse_utc(raw: str) -> datetime:
-    """Parse a naive dump timestamp as UTC."""
     try:
         value = datetime.fromisoformat(raw.strip())
     except ValueError as error:
-        # Python 3.10's fromisoformat rejects PostgreSQL's variable-length
-        # fractional seconds (e.g. .36765); strptime accepts 1–6 digits.
+        # В Python 3.10 дробные секунды переменной длины разбираем через strptime.
         try:
             value = datetime.strptime(raw.strip(), "%Y-%m-%d %H:%M:%S.%f")
         except ValueError:
@@ -122,13 +110,7 @@ def parse_utc(raw: str) -> datetime:
 
 
 def parse_expiry_utc(raw: str) -> datetime:
-    """Parse expiry and repair the dump's two conventions.
-
-    The source stores 2024 and 2025 as ``0024`` and ``0025`` and keeps only the
-    expiry date at midnight. Deribit options expire at 08:00 UTC, which is
-    confirmed by matching the exchange ``mid_IV``; a midnight timestamp is
-    therefore moved to 08:00. Without both repairs ``T`` is badly wrong.
-    """
+    # Исправляем годы 0024/0025 и полночь на фактическую экспирацию в 08:00 UTC.
     value = parse_utc(raw)
     if value.year < 1000:
         value = value.replace(year=value.year + 2000)
@@ -137,7 +119,7 @@ def parse_expiry_utc(raw: str) -> datetime:
     return value
 
 
-def _number(raw: str | None) -> float | None:
+def _parse_number(raw: str | None) -> float | None:
     if raw is None or raw.strip() in {"", r"\N"}:
         return None
     try:
@@ -174,16 +156,15 @@ def _row_from_parts(columns: tuple[str, ...], parts: list[str]) -> OptionRow:
         option_type=values["type"],
         expiry_raw=values["expiry"],
         snapshot_raw=values["current_time"],
-        strike=_number(values.get("strike")),
-        underlying_price=_number(values.get("underlying_price")),
-        bid_price=_number(values.get("bid_price")),
-        ask_price=_number(values.get("ask_price")),
-        exchange_mid_iv=_number(values.get("mid_IV")),
+        strike=_parse_number(values.get("strike")),
+        underlying_price=_parse_number(values.get("underlying_price")),
+        bid_price=_parse_number(values.get("bid_price")),
+        ask_price=_parse_number(values.get("ask_price")),
+        exchange_mid_iv=_parse_number(values.get("mid_IV")),
     )
 
 
 def _iter_options(path: Path, table: str = "public.options_table") -> Iterator[tuple[tuple[str, ...], list[str]]]:
-    """Stream one COPY block, rejecting missing columns, broken rows and truncated files."""
     columns = None
     with _open_text(path) as stream:
         for line_number, raw in enumerate(stream, start=1):
@@ -218,17 +199,11 @@ def _iter_options(path: Path, table: str = "public.options_table") -> Iterator[t
     raise ValueError(f"COPY block for {table!r} is incomplete: terminator not found")
 
 
-def scan_options_table(
+def read_option_snapshot(
     path: Path,
     snapshot: datetime | None = None,
     table: str = "public.options_table",
 ) -> ScanResult:
-    """Scan a gzip/plain pg_dump and return the requested BTC call snapshot.
-
-    The whole table is read exactly once. While scanning, rows belonging to the
-    latest BTC call snapshot (or to ``snapshot`` when supplied) are retained;
-    all other rows are only counted. This avoids loading 35 million rows.
-    """
     if not path.is_file():
         raise FileNotFoundError(f"Dump not found: {path}")
 
@@ -296,8 +271,7 @@ def scan_options_table(
     return ScanResult(stats=stats, rows=selected_rows, snapshot=selected_snapshot)
 
 
-def write_table(path: Path, fields: Sequence[str], rows: Iterable[Mapping[str, Any]]) -> None:
-    """Replace a CSV only after a successful write; leave no temporary files behind."""
+def write_csv(path: Path, fields: Sequence[str], rows: Iterable[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", newline="", dir=path.parent, prefix=f".{path.name}.", delete=False
@@ -324,7 +298,6 @@ def prepare_quotes(
     end: date = END_DATE,
     expiry_day: date = EXPIRY_DATE,
 ) -> dict[str, Any]:
-    """Extract the research quotes, keeping selected rows in memory and no disk cache."""
     if not start < end <= expiry_day:
         raise ValueError("Need start < exclusive end <= expiry")
     if dump.resolve() == output.resolve():
@@ -358,7 +331,7 @@ def prepare_quotes(
             continue
         counts["same_expiry_rows"] += 1
         forward, strike, bid, ask = (
-            _number(parts[indexes[key]]) for key in ("underlying_price", "strike", "bid_price", "ask_price")
+            _parse_number(parts[indexes[key]]) for key in ("underlying_price", "strike", "bid_price", "ask_price")
         )
         if any(value is None or value <= 0 for value in (forward, strike, bid, ask)):
             counts["excluded_invalid_quote_or_parameters"] += 1
@@ -385,7 +358,7 @@ def prepare_quotes(
             raise ValueError(f"Duplicate quote: {timestamp_text}, {name}")
         rows[key] = dict(
             zip(
-                FIELDS,
+                QUOTE_FIELDS,
                 (
                     timestamp_text,
                     name,
@@ -404,7 +377,7 @@ def prepare_quotes(
         )
     if not rows:
         raise ValueError("No suitable historical quotes")
-    write_table(output, FIELDS, (rows[key] for key in sorted(rows)))
+    write_csv(output, QUOTE_FIELDS, (rows[key] for key in sorted(rows)))
     return {
         "quote_rows": len(rows),
         "quote_contracts": len({key[1] for key in rows}),
@@ -414,7 +387,6 @@ def prepare_quotes(
 
 
 def main() -> None:
-    """Prepare quotes.csv without a database, checkpoints or separate metadata files."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dump", type=Path, default=Path("data/dump.sql"))
     parser.add_argument("--output", type=Path, default=Path("data/quotes.csv"))

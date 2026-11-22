@@ -1,7 +1,6 @@
-"""Prepare research OTC trades in the unchanged annual export schema.
+"""Подготовка OTC-сделок BTC call.
 
-By default, filter the saved annual CSV locally. An explicit --download fetches
-only the selected dates and never writes daily captures, receipts or manifests.
+По умолчанию используется локальный CSV; флаг --download включает загрузку за выбранный период.
 """
 
 import argparse
@@ -21,12 +20,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from deribit_data.prepare_quotes import END_DATE, EXPIRY_DATE, START_DATE, parse_utc, write_table
+from deribit_data.prepare_quotes import END_DATE, EXPIRY_DATE, START_DATE, parse_utc, write_csv
 
 LOGGER = logging.getLogger(__name__)
 HISTORY_URL = "https://history.deribit.com/api/v2/public/get_last_trades_by_currency_and_time"
 PAGE_SIZE = 10_000
-FIELDS = (
+TRADE_FIELDS = (
     "trade_id",
     "block_trade_id",
     "trade_seq",
@@ -56,8 +55,7 @@ FIELDS = (
 )
 
 
-def utc_ms(value: date) -> int:
-    """Return UTC midnight as integer Unix milliseconds."""
+def date_to_timestamp_ms(value: date) -> int:
     return int(datetime.combine(value, datetime.min.time(), tzinfo=timezone.utc).timestamp() * 1000)
 
 
@@ -66,11 +64,6 @@ def fetch_complete_range(
     start: int,
     end: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
-    """Return every trade and a disjoint interval audit, or fail on truncation.
-
-    Even one millisecond containing more than the server limit must not silently
-    disappear: that case raises and leaves the day incomplete.
-    """
     pending = [(start, end)]
     trades: dict[str, dict[str, Any]] = {}
     audit = []
@@ -113,14 +106,11 @@ def fetch_complete_range(
 
 
 class HistoryClient:
-    """Public historical GETs with a request rate limit and bounded retries."""
-
     def __init__(self, requests_per_second: float = 8.0) -> None:
         self.interval = 1.0 / requests_per_second
         self.next_request = 0.0
 
     def fetch(self, start: int, end: int) -> dict[str, Any]:
-        """Request one inclusive BTC options time range, retrying transient errors."""
         params = dict(
             currency="BTC", kind="option", start_timestamp=start, end_timestamp=end, count=PAGE_SIZE, sorting="asc"
         )
@@ -160,11 +150,10 @@ class HistoryClient:
 
 
 def normalize_trade(row: dict[str, Any], observed_legs: int, source_file: str) -> dict[str, Any]:
-    """Convert a BTC inverse call trade to explicit units without inferring a forward."""
     currency, expiry_text, strike_text, option_type = row["instrument_name"].split("-")
     if currency != "BTC" or option_type != "C":
         raise ValueError("Only BTC inverse calls can be normalized")
-    # Explicit English month mapping makes parsing independent of system locale.
+    # Названия месяцев разбираем независимо от системной локали.
     month_text = expiry_text[-5:-2].upper()
     month = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC").index(month_text) + 1
     expiry = datetime(2000 + int(expiry_text[-2:]), month, int(expiry_text[:-5]), 8, tzinfo=timezone.utc)
@@ -180,7 +169,7 @@ def normalize_trade(row: dict[str, Any], observed_legs: int, source_file: str) -
     )
     return dict(
         zip(
-            FIELDS,
+            TRADE_FIELDS,
             (
                 row["trade_id"],
                 row["block_trade_id"],
@@ -214,11 +203,11 @@ def normalize_trade(row: dict[str, Any], observed_legs: int, source_file: str) -
     )
 
 
-def _read_annual(source: Path) -> Iterator[dict[str, str]]:
+def _read_annual_trades(source: Path) -> Iterator[dict[str, str]]:
     opener = gzip.open if source.suffix == ".gz" else Path.open
     with opener(source, "rt", encoding="utf-8", newline="") as stream:
         reader = csv.DictReader(stream)
-        if tuple(reader.fieldnames or ()) != FIELDS:
+        if tuple(reader.fieldnames or ()) != TRADE_FIELDS:
             raise ValueError("OTC source must have the annual export's columns in the original order")
         for row in reader:
             if None in row or any(value is None for value in row.values()):
@@ -231,17 +220,18 @@ def _download_trades(start: date, end: date) -> list[dict[str, Any]]:
     blocks = []
     day = start
     while day < end:
-        low, high = utc_ms(day), utc_ms(day + timedelta(days=1)) - 1
+        low, high = date_to_timestamp_ms(day), date_to_timestamp_ms(day + timedelta(days=1)) - 1
         trades, _, requests = fetch_complete_range(client.fetch, low, high)
         blocks.extend(row for row in trades if row.get("block_trade_id") not in (None, ""))
         LOGGER.info("%s: %s trades scanned (%s requests)", day, len(trades), requests)
         day += timedelta(days=1)
     if len({str(row["trade_id"]) for row in blocks}) != len(blocks):
         raise ValueError("Duplicate trade IDs across daily time ranges")
-    # Count calls AND puts before selecting calls or contracts; otherwise packages
-    # could be mistaken for standalone trades after filtering.
+    # Считаем call- и put-ноги до фильтрации, чтобы не принять пакет за отдельную сделку.
     observed = Counter(str(row["block_trade_id"]) for row in blocks)
-    source = f"{HISTORY_URL}?start_timestamp={utc_ms(start)}&end_timestamp={utc_ms(end) - 1}"
+    source = (
+        f"{HISTORY_URL}?start_timestamp={date_to_timestamp_ms(start)}&end_timestamp={date_to_timestamp_ms(end) - 1}"
+    )
     return [
         normalize_trade(row, observed[str(row["block_trade_id"])], source)
         for row in blocks
@@ -249,7 +239,7 @@ def _download_trades(start: date, end: date) -> list[dict[str, Any]]:
     ]
 
 
-def _quote_contracts(quotes: Path, start: date, end: date, expiry: datetime) -> set[str]:
+def _read_quote_contracts(quotes: Path, start: date, end: date, expiry: datetime) -> set[str]:
     with quotes.open(encoding="utf-8", newline="") as stream:
         reader = csv.DictReader(stream)
         if not {"instrument_name", "timestamp_utc", "expiry_utc"} <= set(reader.fieldnames or ()):
@@ -274,17 +264,16 @@ def prepare_otc_trades(
     *,
     download: bool = False,
 ) -> dict[str, Any]:
-    """Select OTC rows by UTC dates, expiry and quote contracts, without changing their values."""
     if not start < end <= expiry_day:
         raise ValueError("Need start < exclusive end <= expiry")
     if output.resolve() in {source.resolve(), quotes.resolve()}:
         raise ValueError("Output must not overwrite the annual source or quotes")
     expiry = datetime(expiry_day.year, expiry_day.month, expiry_day.day, 8, tzinfo=timezone.utc)
-    universe = _quote_contracts(quotes, start, end, expiry)
-    originals: Iterable[dict[str, Any]] = _download_trades(start, end) if download else _read_annual(source)
+    quote_contracts = _read_quote_contracts(quotes, start, end, expiry)
+    originals: Iterable[dict[str, Any]] = _download_trades(start, end) if download else _read_annual_trades(source)
     counts: Counter[str] = Counter()
     rows = []
-    seen = set()
+    seen_trade_ids = set()
     for row in originals:
         counts["all_source_rows"] += 1
         if row["currency"] != "BTC" or row["option_type"] != "call":
@@ -295,17 +284,16 @@ def prepare_otc_trades(
         if parse_utc(row["expiry_utc"]) != expiry:
             continue
         counts["same_expiry_rows"] += 1
-        if row["instrument_name"] not in universe:
+        if row["instrument_name"] not in quote_contracts:
             counts["excluded_contract_not_in_quote_universe"] += 1
             continue
         trade_id = str(row["trade_id"])
-        if not trade_id or trade_id in seen:
+        if not trade_id or trade_id in seen_trade_ids:
             raise ValueError(f"Missing or duplicate OTC trade ID: {trade_id}")
-        seen.add(trade_id)
+        seen_trade_ids.add(trade_id)
         rows.append(row)
-    # Keep the annual export's timestamp/ID ordering and all 26 source columns.
     rows.sort(key=lambda row: (int(row["timestamp_ms"]), str(row["trade_id"])))
-    write_table(output, FIELDS, rows)
+    write_csv(output, TRADE_FIELDS, rows)
     return {
         "otc_rows": len(rows),
         "otc_contracts": len({row["instrument_name"] for row in rows}),
@@ -315,7 +303,6 @@ def prepare_otc_trades(
 
 
 def main() -> None:
-    """Prepare OTC trades locally, or explicitly download only the requested dates."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=Path("data/otc_2024/btc_call_block_trades.csv.gz"))
     parser.add_argument("--quotes", type=Path, default=Path("data/quotes.csv"))

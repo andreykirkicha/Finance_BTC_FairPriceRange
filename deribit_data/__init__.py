@@ -1,3 +1,3 @@
-"""Prepare historical Deribit BTC call data and recover implied volatility."""
+"""Загрузка и подготовка данных Deribit, формирование таблиц и отчётов."""
 
 __all__: list[str] = []

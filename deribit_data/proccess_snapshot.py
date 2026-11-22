@@ -1,4 +1,4 @@
-"""Compute implied volatility for one historical BTC option snapshot."""
+"""Чтение снимка котировок, подготовка входных значений и сохранение расчётных таблиц и отчёта."""
 
 import argparse
 import csv
@@ -7,33 +7,28 @@ import logging
 import math
 import platform
 import statistics
-from collections import Counter, defaultdict
-from collections.abc import Iterable, Sequence
-from dataclasses import asdict, dataclass
+from collections import defaultdict
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
 import scipy
 
-from deribit_data.iv import BrentConfig, implied_volatility
-from deribit_data.prepare_quotes import OptionRow, ScanResult, scan_options_table
+from deribit_data.prepare_quotes import OptionRow, ScanResult, read_option_snapshot
+from option_pricing.inverse_call import BrentConfig
+from option_pricing.snapshot import IVFilters, IVRow, OptionQuote, calculate_iv_rows
 
 __all__ = [
     "CSV_FIELDS",
-    "IVFilters",
-    "IVRow",
-    "build_iv_rows",
     "build_summary",
     "main",
     "render_report",
-    "write_csv",
+    "write_iv_csv",
 ]
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DUMP = Path("data/dump.sql")
-DAYS_PER_YEAR = 365.0
-SECONDS_PER_DAY = 86_400.0
-
 CSV_FIELDS = (
     "instrument_name",
     "expiry_utc",
@@ -47,22 +42,6 @@ CSV_FIELDS = (
     "mid_btc",
     "iv_brent",
     "iv_brent_pct",
-)
-
-REASON_ORDER = (
-    "invalid_timestamp",
-    "expired_or_nonpositive_T",
-    "missing_or_invalid_forward",
-    "missing_or_invalid_strike",
-    "missing_or_nonpositive_quote",
-    "crossed_quote",
-    "outside_model_bounds",
-    "outside_atm",
-    "lt_min_days_to_expiry",
-    "no_bracket",
-    "solver_error",
-    "not_converged",
-    "price_residual",
 )
 
 REASON_LABELS = {
@@ -82,150 +61,30 @@ REASON_LABELS = {
 }
 
 
-@dataclass(frozen=True, slots=True)
-class IVFilters:
-    """Selection rules applied before the volatility solve."""
-
-    max_log_moneyness: float = 0.15
-    min_days_to_expiry: float = 1.0
-
-    def __post_init__(self) -> None:
-        if not (math.isfinite(self.max_log_moneyness) and self.max_log_moneyness > 0):
-            raise ValueError("max_log_moneyness must be finite and positive")
-        if not (math.isfinite(self.min_days_to_expiry) and self.min_days_to_expiry >= 0):
-            raise ValueError("min_days_to_expiry must be finite and non-negative")
-
-
-@dataclass(frozen=True, slots=True)
-class IVRow:
-    """A successful IV observation, ready for the result CSV."""
-
-    instrument_name: str
-    expiry_utc: datetime
-    snapshot_utc: datetime
-    strike_usd: float
-    forward_usd: float
-    days_to_expiry: float
-    log_moneyness: float
-    bid_btc: float
-    ask_btc: float
-    mid_btc: float
-    iv_brent: float
-    exchange_mid_iv: float | None
-
-    @property
-    def iv_brent_pct(self) -> float:
-        return self.iv_brent * 100.0
-
-
-def _assess_row(row: OptionRow, filters: IVFilters, config: BrentConfig) -> tuple[IVRow | None, str | None]:
-    try:
-        expiry = row.expiry_utc
-        snapshot = row.snapshot_utc
-    except ValueError:
-        return None, "invalid_timestamp"
-
-    time_to_expiry = (expiry - snapshot).total_seconds() / (DAYS_PER_YEAR * SECONDS_PER_DAY)
-    if time_to_expiry <= 0:
-        return None, "expired_or_nonpositive_T"
-
-    forward, strike = row.underlying_price, row.strike
-    if forward is None or not math.isfinite(forward) or forward <= 0:
-        return None, "missing_or_invalid_forward"
-    if strike is None or not math.isfinite(strike) or strike <= 0:
-        return None, "missing_or_invalid_strike"
-
-    bid, ask = row.bid_price, row.ask_price
-    if bid is None or ask is None or not math.isfinite(bid) or not math.isfinite(ask) or bid <= 0 or ask <= 0:
-        return None, "missing_or_nonpositive_quote"
-    if bid > ask:
-        return None, "crossed_quote"
-
-    mid = (bid + ask) / 2.0
-    if not max(1.0 - strike / forward, 0.0) < mid < 1.0:
-        return None, "outside_model_bounds"
-
-    log_moneyness = math.log(strike / forward)
-    if abs(log_moneyness) > filters.max_log_moneyness:
-        return None, "outside_atm"
-
-    days_to_expiry = time_to_expiry * DAYS_PER_YEAR
-    if days_to_expiry < filters.min_days_to_expiry:
-        return None, "lt_min_days_to_expiry"
-
-    result = implied_volatility(mid, forward, strike, time_to_expiry, config)
-    if result.reason is not None:
-        return None, result.reason
-    if result.iv is None:
-        return None, "solver_error"
-
-    return (
-        IVRow(
+def _prepare_snapshot_quotes(rows: Iterable[OptionRow]) -> Iterator[OptionQuote]:
+    for row in rows:
+        try:
+            expiry = row.expiry_utc
+            snapshot = row.snapshot_utc
+        except ValueError:
+            expiry = snapshot = None
+        yield OptionQuote(
             instrument_name=row.instrument_name,
             expiry_utc=expiry,
             snapshot_utc=snapshot,
-            strike_usd=strike,
-            forward_usd=forward,
-            days_to_expiry=days_to_expiry,
-            log_moneyness=log_moneyness,
-            bid_btc=bid,
-            ask_btc=ask,
-            mid_btc=mid,
-            iv_brent=result.iv,
+            strike_usd=row.strike,
+            forward_usd=row.underlying_price,
+            bid_btc=row.bid_price,
+            ask_btc=row.ask_price,
             exchange_mid_iv=row.exchange_mid_iv,
-        ),
-        None,
-    )
-
-
-def build_iv_rows(
-    option_rows: Iterable[OptionRow],
-    filters: IVFilters | None = None,
-    config: BrentConfig | None = None,
-) -> tuple[list[IVRow], dict[str, object]]:
-    """Apply filters and solve IV for every eligible row.
-
-    Returns successful rows and a counters dictionary with the input count,
-    exclusion reasons in a stable order, and the number of solved rows.
-    """
-    filters = filters or IVFilters()
-    config = config or BrentConfig()
-    source_rows = list(option_rows)
-    reasons: Counter[str] = Counter()
-    rows: list[IVRow] = []
-
-    for row in source_rows:
-        iv_row, reason = _assess_row(row, filters, config)
-        if reason is not None:
-            reasons[reason] += 1
-            continue
-        if iv_row is None:
-            reasons["solver_error"] += 1
-            continue
-        rows.append(iv_row)
-
-    rows.sort(key=lambda row: (row.expiry_utc, row.strike_usd, row.instrument_name))
-    excluded = {reason: reasons[reason] for reason in REASON_ORDER if reasons[reason]}
-    for reason in reasons:
-        if reason not in excluded:
-            excluded[reason] = reasons[reason]
-
-    counts: dict[str, object] = {
-        "input": len(source_rows),
-        "excluded": excluded,
-        "solved": len(rows),
-    }
-    if sum(excluded.values()) + len(rows) != len(source_rows):
-        raise AssertionError("exclusion counters do not add up to the input count")
-    return rows, counts
+        )
 
 
 def _format_float(value: float, significant: int = 15) -> str:
     return format(value, f".{significant}g")
 
 
-def write_csv(path: Path, rows: Sequence[IVRow]) -> None:
-    """Write only successful observations, with a fixed column order."""
+def write_iv_csv(path: Path, rows: Sequence[IVRow]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=CSV_FIELDS, lineterminator="\n")
@@ -344,7 +203,6 @@ def build_summary(
     rows: Sequence[IVRow],
     snapshot_explicit: bool,
 ) -> dict[str, object]:
-    """Build a JSON-serializable provenance and statistics document."""
     stats = scan.stats
     snapshot = scan.snapshot
     iv_values = [row.iv_brent for row in rows]
@@ -391,24 +249,23 @@ def build_summary(
     }
 
 
-def _fmt_int(value: object) -> str:
+def _format_integer(value: object) -> str:
     return f"{int(value):,}".replace(",", " ")
 
 
-def _fmt_number(value: object, digits: int = 6) -> str:
+def _format_number(value: object, digits: int = 6) -> str:
     if value is None:
         return "—"
     return f"{float(value):.{digits}f}"
 
 
-def _fmt_pct(value: object, total: object) -> str:
+def _format_percentage(value: object, total: object) -> str:
     if not total:
         return "—"
     return f"{100.0 * float(value) / float(total):.1f}%"
 
 
 def render_report(summary: dict[str, object]) -> str:
-    """Render a human-readable Russian report from the summary dictionary."""
     dataset = summary["dataset"]
     input_info = summary["input"]
     counts = summary["counts"]
@@ -425,7 +282,7 @@ def render_report(summary: dict[str, object]) -> str:
         f"- **Снимок:** `{summary['snapshot_utc']}`",
         f"- **Сформирован:** `{summary['generated_at_utc']}`",
         f"- **Входной файл:** `{input_info['path']}`",
-        f"- **Размер:** {_fmt_int(input_info['size_bytes'])} байт",
+        f"- **Размер:** {_format_integer(input_info['size_bytes'])} байт",
         f"- **SHA256:** `{input_info['sha256'] or 'не найден'}`",
         f"- **Таблица:** `{input_info['table']}`",
         "",
@@ -441,13 +298,13 @@ def render_report(summary: dict[str, object]) -> str:
         "",
         "| Показатель | Значение |",
         "| --- | ---: |",
-        f"| Всего строк в `options_table` | {_fmt_int(dataset['total_rows'])} |",
-        f"| Строк BTC | {_fmt_int(dataset['btc_rows'])} |",
-        f"| BTC call | {_fmt_int(dataset['btc_calls'])} |",
-        f"| BTC put | {_fmt_int(dataset['btc_puts'])} |",
-        f"| Строк ETH | {_fmt_int(dataset['eth_rows'])} |",
-        f"| Снимков BTC call | {_fmt_int(dataset['btc_call_snapshots'])} |",
-        f"| BTC call в выбранном снимке | {_fmt_int(summary['rows_in_snapshot'])} |",
+        f"| Всего строк в `options_table` | {_format_integer(dataset['total_rows'])} |",
+        f"| Строк BTC | {_format_integer(dataset['btc_rows'])} |",
+        f"| BTC call | {_format_integer(dataset['btc_calls'])} |",
+        f"| BTC put | {_format_integer(dataset['btc_puts'])} |",
+        f"| Строк ETH | {_format_integer(dataset['eth_rows'])} |",
+        f"| Снимков BTC call | {_format_integer(dataset['btc_call_snapshots'])} |",
+        f"| BTC call в выбранном снимке | {_format_integer(summary['rows_in_snapshot'])} |",
         "",
         "## 2. Методика",
         "",
@@ -477,15 +334,15 @@ def render_report(summary: dict[str, object]) -> str:
         "",
         "| Причина | Строк | Доля |",
         "| --- | ---: | ---: |",
-        f"| Вход | {_fmt_int(total)} | 100.0% |",
+        f"| Вход | {_format_integer(total)} | 100.0% |",
     ]
 
     for reason, count in excluded.items():
         label = REASON_LABELS.get(str(reason), str(reason))
-        lines.append(f"| {label} | {_fmt_int(count)} | {_fmt_pct(count, total)} |")
+        lines.append(f"| {label} | {_format_integer(count)} | {_format_percentage(count, total)} |")
     lines.extend(
         [
-            f"| **Успешно посчитано** | **{_fmt_int(solved)}** | **{_fmt_pct(solved, total)}** |",
+            f"| **Успешно посчитано** | **{_format_integer(solved)}** | **{_format_percentage(solved, total)}** |",
             "",
             "## 4. Численный метод",
             "",
@@ -504,13 +361,13 @@ def render_report(summary: dict[str, object]) -> str:
             "",
             "| Показатель | IV, доли |",
             "| --- | ---: |",
-            f"| Наблюдений | {_fmt_int(iv_stats['n'])} |",
-            f"| Минимум | {_fmt_number(iv_stats['min'], 6)} |",
-            f"| 5-й перцентиль | {_fmt_number(iv_stats['p05'], 6)} |",
-            f"| Медиана | {_fmt_number(iv_stats['median'], 6)} |",
-            f"| Среднее | {_fmt_number(iv_stats['mean'], 6)} |",
-            f"| 95-й перцентиль | {_fmt_number(iv_stats['p95'], 6)} |",
-            f"| Максимум | {_fmt_number(iv_stats['max'], 6)} |",
+            f"| Наблюдений | {_format_integer(iv_stats['n'])} |",
+            f"| Минимум | {_format_number(iv_stats['min'], 6)} |",
+            f"| 5-й перцентиль | {_format_number(iv_stats['p05'], 6)} |",
+            f"| Медиана | {_format_number(iv_stats['median'], 6)} |",
+            f"| Среднее | {_format_number(iv_stats['mean'], 6)} |",
+            f"| 95-й перцентиль | {_format_number(iv_stats['p95'], 6)} |",
+            f"| Максимум | {_format_number(iv_stats['max'], 6)} |",
             "",
             "### По экспирациям",
             "",
@@ -520,8 +377,8 @@ def render_report(summary: dict[str, object]) -> str:
     )
     for group in summary["by_expiry"]:
         lines.append(
-            f"| {group['expiry']} | {group['n']} | {_fmt_number(group['iv_min'], 6)} | "
-            f"{_fmt_number(group['iv_median'], 6)} | {_fmt_number(group['iv_max'], 6)} |"
+            f"| {group['expiry']} | {group['n']} | {_format_number(group['iv_min'], 6)} | "
+            f"{_format_number(group['iv_median'], 6)} | {_format_number(group['iv_max'], 6)} |"
         )
     lines.extend(
         [
@@ -532,12 +389,12 @@ def render_report(summary: dict[str, object]) -> str:
             "",
             "| Показатель | Значение |",
             "| --- | ---: |",
-            f"| Строк с биржевой IV | {_fmt_int(exchange['n'])} |",
-            f"| Среднее абсолютное расхождение | {_fmt_number(exchange['mean_abs_diff'], 6)} |",
-            f"| Медианное абсолютное расхождение | {_fmt_number(exchange['median_abs_diff'], 6)} |",
-            f"| Максимальное абсолютное расхождение | {_fmt_number(exchange['max_abs_diff'], 6)} |",
-            f"| Расхождение ≤ 0.001 | {_fmt_int(exchange['within_0_001'])} |",
-            f"| Расхождение ≤ 0.01 | {_fmt_int(exchange['within_0_01'])} |",
+            f"| Строк с биржевой IV | {_format_integer(exchange['n'])} |",
+            f"| Среднее абсолютное расхождение | {_format_number(exchange['mean_abs_diff'], 6)} |",
+            f"| Медианное абсолютное расхождение | {_format_number(exchange['median_abs_diff'], 6)} |",
+            f"| Максимальное абсолютное расхождение | {_format_number(exchange['max_abs_diff'], 6)} |",
+            f"| Расхождение ≤ 0.001 | {_format_integer(exchange['within_0_001'])} |",
+            f"| Расхождение ≤ 0.01 | {_format_integer(exchange['within_0_01'])} |",
             "",
             "## 7. Ограничения",
             "",
@@ -553,7 +410,7 @@ def render_report(summary: dict[str, object]) -> str:
             "",
             "```bash",
             'python3 -m pip install "scipy>=1.15"',
-            "python3 -m deribit_data.iv_pipeline \\",
+            "python3 -m deribit_data.proccess_snapshot \\",
             f"  --dump {input_info['path']} \\",
             "  --output-dir results",
             "```",
@@ -624,7 +481,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     try:
-        scan = scan_options_table(args.dump, args.snapshot)
+        scan = read_option_snapshot(args.dump, args.snapshot)
         snapshot = scan.snapshot
         if snapshot is None:
             raise ValueError("В дампе не найдено ни одного BTC call")
@@ -636,7 +493,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             min_days_to_expiry=args.min_days_to_expiry,
         )
         config = BrentConfig()
-        rows, counts = build_iv_rows(scan.rows, filters, config)
+        rows, counts = calculate_iv_rows(_prepare_snapshot_quotes(scan.rows), filters, config)
 
         stamp = snapshot.strftime("%Y%m%dT%H%M%SZ")
         csv_path = args.output_dir / f"iv_{stamp}.csv"
@@ -648,7 +505,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise FileExistsError(f"Результаты уже существуют: {', '.join(str(path) for path in existing)}")
         args.output_dir.mkdir(parents=True, exist_ok=True)
 
-        write_csv(csv_path, rows)
+        write_iv_csv(csv_path, rows)
         summary = build_summary(
             args.dump,
             scan,
