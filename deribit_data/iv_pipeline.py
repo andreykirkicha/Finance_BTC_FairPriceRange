@@ -8,15 +8,15 @@ import math
 import platform
 import statistics
 from collections import Counter, defaultdict
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Sequence
 
 import scipy
 
 from deribit_data.iv import BrentConfig, implied_volatility
-from deribit_data.pg_dump import OptionRow, ScanResult, parse_utc, scan_options_table
+from deribit_data.prepare_quotes import OptionRow, ScanResult, scan_options_table
 
 __all__ = [
     "CSV_FIELDS",
@@ -30,7 +30,7 @@ __all__ = [
 ]
 
 LOGGER = logging.getLogger(__name__)
-DEFAULT_DUMP = Path("datasets/dump_2024-11-09_00_46_57.sql.gz")
+DEFAULT_DUMP = Path("data/dump.sql")
 DAYS_PER_YEAR = 365.0
 SECONDS_PER_DAY = 86_400.0
 
@@ -451,8 +451,7 @@ def render_report(summary: dict[str, object]) -> str:
         "",
         "## 2. Методика",
         "",
-        "Для BTC inverse call премия выражается в BTC. Используется форвардная цена `F`, "
-        "страйк `K` и срок `T`:",
+        "Для BTC inverse call премия выражается в BTC. Используется форвардная цена `F`, страйк `K` и срок `T`:",
         "",
         "```text",
         "C(σ) = Φ(d1) − (K/F)Φ(d2)",
