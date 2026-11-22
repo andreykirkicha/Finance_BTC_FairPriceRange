@@ -3,7 +3,7 @@ name = "btc-option-research"
 version = "0.1.0"
 description = "Deribit market data for BTC inverse option price intervals"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["scipy>=1.15"]
 
 [tool.ruff]
 line-length = 120

@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-11-22T16:30:07.296415+00:00",
+  "input": {
+    "path": "datasets/dump_2024-11-09_00_46_57.sql.gz",
+    "size_bytes": 1917652293,
+    "sha256": "42d71616bbbc6ce45220baa78ae433963d7a12e33ce333d0f457a7515bb033c5",
+    "table": "public.options_table"
+  },
+  "dataset": {
+    "total_rows": 35021950,
+    "btc_rows": 18733214,
+    "btc_calls": 9366607,
+    "btc_puts": 9366607,
+    "eth_rows": 16288736,
+    "other_rows": 0,
+    "btc_call_snapshots": 19112,
+    "latest_snapshot_utc": "2024-06-04T08:57:48.287611+00:00"
+  },
+  "snapshot_utc": "2024-06-04T08:57:48.287611+00:00",
+  "snapshot_selection": "latest BTC call current_time",
+  "rows_in_snapshot": 462,
+  "filters": {
+    "max_log_moneyness": 0.15,
+    "min_days_to_expiry": 1.0
+  },
+  "model": {
+    "forward": "underlying_price from the same row",
+    "rate": 0.0,
+    "day_count": "ACT/365F",
+    "mid": "(bid_price + ask_price) / 2",
+    "expiry_year_repair": "years below 1000 are increased by 2000",
+    "expiry_time_repair": "midnight expiry timestamps are interpreted as 08:00 UTC"
+  },
+  "brent": {
+    "low": 1e-08,
+    "high": 10.0,
+    "xtol": 1e-10,
+    "rtol": 1e-12,
+    "maxiter": 100,
+    "price_tolerance": 1e-10
+  },
+  "counts": {
+    "input": 462,
+    "excluded": {
+      "missing_or_nonpositive_quote": 31,
+      "outside_model_bounds": 14,
+      "outside_atm": 251,
+      "lt_min_days_to_expiry": 18
+    },
+    "solved": 148
+  },
+  "iv_stats": {
+    "n": 148,
+    "min": 0.3910441423535032,
+    "p05": 0.4122649666255893,
+    "median": 0.5102314413577189,
+    "mean": 0.5189402763906397,
+    "p95": 0.6686998117920705,
+    "max": 0.7595876892608199
+  },
+  "by_expiry": [
+    {
+      "expiry": "2024-06-06",
+      "n": 25,
+      "iv_min": 0.3910441423535032,
+      "iv_median": 0.4441003789913074,
+      "iv_max": 0.7595876892608199
+    },
+    {
+      "expiry": "2024-06-07",
+      "n": 24,
+      "iv_min": 0.41041052656121696,
+      "iv_median": 0.46440109361922477,
+      "iv_max": 0.7217947421969237
+    },
+    {
+      "expiry": "2024-06-14",
+      "n": 18,
+      "iv_min": 0.45291553177415317,
+      "iv_median": 0.47483580100922723,
+      "iv_max": 0.541910310771496
+    },
+    {
+      "expiry": "2024-06-21",
+      "n": 17,
+      "iv_min": 0.46154230421422726,
+      "iv_median": 0.4785870032784017,
+      "iv_max": 0.5153537484227322
+    },
+    {
+      "expiry": "2024-06-28",
+      "n": 12,
+      "iv_min": 0.4903662728419831,
+      "iv_median": 0.4996793053362234,
+      "iv_max": 0.5226697241994483
+    },
+    {
+      "expiry": "2024-07-26",
+      "n": 20,
+      "iv_min": 0.5264553825221144,
+      "iv_median": 0.5320400078243184,
+      "iv_max": 0.5461606595725312
+    },
+    {
+      "expiry": "2024-08-30",
+      "n": 19,
+      "iv_min": 0.5647495666060546,
+      "iv_median": 0.5687877707491452,
+      "iv_max": 0.5861495685108523
+    },
+    {
+      "expiry": "2024-09-27",
+      "n": 4,
+      "iv_min": 0.5856833216123024,
+      "iv_median": 0.5901342277060538,
+      "iv_max": 0.5986188554796689
+    },
+    {
+      "expiry": "2024-12-27",
+      "n": 5,
+      "iv_min": 0.6347056639192505,
+      "iv_median": 0.641387316005859,
+      "iv_max": 0.6502602426844518
+    },
+    {
+      "expiry": "2025-03-28",
+      "n": 4,
+      "iv_min": 0.665946117161224,
+      "iv_median": 0.6721863431700125,
+      "iv_max": 0.6835949844405698
+    }
+  ],
+  "exchange_iv_comparison": {
+    "n": 148,
+    "mean_abs_diff": 0.00017376190742906557,
+    "median_abs_diff": 0.00017189817545992803,
+    "max_abs_diff": 0.00024421154166509584,
+    "within_0_001": 148,
+    "within_0_01": 148,
+    "note": "exchange IV is diagnostic only and is not an input"
+  },
+  "software": {
+    "python": "3.13.5",
+    "scipy": "1.15.3"
+  },
+  "outputs": {
+    "csv": "iv_20240604T085748Z.csv",
+    "summary": "iv_20240604T085748Z_summary.json",
+    "report": "iv_report_20240604T085748Z.md"
+  }
+}
