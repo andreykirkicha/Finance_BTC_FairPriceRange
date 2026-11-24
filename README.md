@@ -4,9 +4,10 @@
 
 | Путь | Что реализовано |
 | --- | --- |
-| `deribit_data/prepare_quotes.py` | Чтение SQL-дампа, исправление дат, отбор ATM-котировок и сохранение `quotes.csv` |
+| `deribit_data/prepare_quotes.py` | Чтение SQL-дампа, исправление дат, отбор ATM-котировок на 25–35 дней и сохранение `quotes.csv` |
 | `deribit_data/prepare_otc_trades.py` | Отбор OTC-сделок из годовой выгрузки или загрузка через API Deribit |
 | `deribit_data/proccess_snapshot.py` | Чтение снимка котировок, передача значений в расчёты, сохранение CSV, статистики и отчёта |
+| `deribit_data/pilot.py` | Пилот: фиксированный 20% holdout, квантили, интервалы и проверка block trades |
 | `option_pricing/inverse_call.py` | Цена обратного call-опциона в BTC и восстановление IV методом Брента |
 | `option_pricing/snapshot.py` | Расчёт IV набора котировок, фильтры и причины исключения |
 | `option_pricing/__init__.py` | Публичные импорты математических функций и классов |
@@ -24,8 +25,9 @@
 
 ```bash
 python3 -m pip install -e .
-python3 -m deribit_data.prepare_quotes
-python3 -m deribit_data.prepare_otc_trades
+python3 -m deribit_data.prepare_quotes --max-snapshots 30
+python3 -m deribit_data.prepare_otc_trades --download
+python3 -m deribit_data.pilot
 python3 -m deribit_data.proccess_snapshot
 ```
 
@@ -37,11 +39,36 @@ python3 -m deribit_data.proccess_snapshot
 python3 -m deribit_data.prepare_otc_trades --download
 ```
 
-По умолчанию подготовка выбирает 20 мая — 2 июня 2024 года включительно
-и экспирацию 26 июля 2024 года. Даты меняются через `--start`, `--end`
-(исключительная граница UTC) и `--expiry`.
+По умолчанию подготовка выбирает 25 мая — 2 июня 2024 года включительно
+и экспирацию 28 июня 2024 года: это 25–35 дней до экспирации.
+`--max-snapshots 30` оставляет 30 снимков, равномерно распределённых по периоду.
+Даты меняются через `--start`, `--end` (исключительная граница UTC) и `--expiry`.
 Расчёт IV обрабатывает один снимок дампа: последний по умолчанию или заданный
 через `--snapshot`. Параметры каждой команды доступны через `--help`.
+
+Если дамп лежит не в `data/dump.sql`, укажите его явно:
+
+```bash
+python3 -m deribit_data.prepare_quotes \
+  --dump datasets/dump_2024-11-09_00_46_57.sql.gz \
+  --max-snapshots 30
+```
+
+## Пилот на 30 снимках
+
+Текущий пилот использует экспирацию 28 июня 2024 и 30 снимков:
+
+```bash
+python3 -m deribit_data.prepare_quotes \
+  --dump datasets/dump_2024-11-09_00_46_57.sql.gz \
+  --output data/quotes.csv --max-snapshots 30
+python3 -m deribit_data.prepare_otc_trades \
+  --quotes data/quotes.csv --output data/otc_trades.csv --download
+python3 -m deribit_data.pilot
+```
+
+Результаты пилота сохраняются в `results/pilot/`: `holdout_intervals.csv`,
+`block_intervals.csv`, `metrics.json`, `report.md` и графики в `results/pilot/plots/`.
 
 ## Исследовательский пайплайн
 

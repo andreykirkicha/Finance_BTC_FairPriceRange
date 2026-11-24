@@ -20,11 +20,19 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from deribit_data.prepare_quotes import END_DATE, EXPIRY_DATE, START_DATE, parse_utc, write_csv
+from deribit_data.prepare_quotes import (
+    END_DATE,
+    EXPIRY_DATE,
+    MAX_DAYS_TO_EXPIRY,
+    MIN_DAYS_TO_EXPIRY,
+    START_DATE,
+    parse_utc,
+    write_csv,
+)
 
 LOGGER = logging.getLogger(__name__)
 HISTORY_URL = "https://history.deribit.com/api/v2/public/get_last_trades_by_currency_and_time"
-PAGE_SIZE = 10_000
+PAGE_SIZE = 1_000
 TRADE_FIELDS = (
     "trade_id",
     "block_trade_id",
@@ -284,6 +292,13 @@ def prepare_otc_trades(
         if parse_utc(row["expiry_utc"]) != expiry:
             continue
         counts["same_expiry_rows"] += 1
+        days_to_expiry = float(row["days_to_expiry"])
+        if not MIN_DAYS_TO_EXPIRY <= days_to_expiry <= MAX_DAYS_TO_EXPIRY:
+            counts["excluded_outside_horizon"] += 1
+            continue
+        if row["package_status"] != "single_leg_reported":
+            counts["excluded_not_single_leg"] += 1
+            continue
         if row["instrument_name"] not in quote_contracts:
             counts["excluded_contract_not_in_quote_universe"] += 1
             continue

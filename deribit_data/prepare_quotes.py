@@ -27,11 +27,13 @@ __all__ = [
 ]
 
 DERIBIT_EXPIRY_HOUR_UTC = 8
-START_DATE = date(2024, 5, 20)
+START_DATE = date(2024, 5, 25)
 END_DATE = date(2024, 6, 3)
-EXPIRY_DATE = date(2024, 7, 26)
+EXPIRY_DATE = date(2024, 6, 28)
 MAX_LOG_MONEYNESS = 0.15
 MAX_RELATIVE_SPREAD = 0.20
+MIN_DAYS_TO_EXPIRY = 25.0
+MAX_DAYS_TO_EXPIRY = 35.0
 QUOTE_FIELDS = (
     "timestamp_utc",
     "instrument_name",
@@ -297,9 +299,12 @@ def prepare_quotes(
     start: date = START_DATE,
     end: date = END_DATE,
     expiry_day: date = EXPIRY_DATE,
+    max_snapshots: int | None = None,
 ) -> dict[str, Any]:
     if not start < end <= expiry_day:
         raise ValueError("Need start < exclusive end <= expiry")
+    if max_snapshots is not None and max_snapshots < 1:
+        raise ValueError("max_snapshots must be positive")
     if dump.resolve() == output.resolve():
         raise ValueError("Output must not overwrite the source dump")
     expiry = datetime.combine(expiry_day, day_time(8), tzinfo=timezone.utc)
@@ -351,6 +356,10 @@ def prepare_quotes(
         if spread > MAX_RELATIVE_SPREAD:
             counts["excluded_wide_spread"] += 1
             continue
+        days_to_expiry = (expiry - timestamp).total_seconds() / 86400
+        if not MIN_DAYS_TO_EXPIRY <= days_to_expiry <= MAX_DAYS_TO_EXPIRY:
+            counts["excluded_outside_horizon"] += 1
+            continue
         name = name if name.endswith("-C") else name + "-C"
         timestamp_text = timestamp.isoformat(timespec="microseconds")
         key = timestamp_text, name
@@ -368,7 +377,7 @@ def prepare_quotes(
                     bid,
                     ask,
                     mid,
-                    (expiry - timestamp).total_seconds() / (365 * 86400),
+                    days_to_expiry / 365,
                     moneyness,
                     spread,
                 ),
@@ -377,6 +386,17 @@ def prepare_quotes(
         )
     if not rows:
         raise ValueError("No suitable historical quotes")
+    timestamps = sorted({key[0] for key in rows})
+    if max_snapshots is not None and len(timestamps) > max_snapshots:
+        if max_snapshots == 1:
+            selected = {timestamps[len(timestamps) // 2]}
+        else:
+            selected = {
+                timestamps[round(index * (len(timestamps) - 1) / (max_snapshots - 1))]
+                for index in range(max_snapshots)
+            }
+        rows = {key: value for key, value in rows.items() if key[0] in selected}
+        counts["selected_snapshots"] = len({key[0] for key in rows})
     write_csv(output, QUOTE_FIELDS, (rows[key] for key in sorted(rows)))
     return {
         "quote_rows": len(rows),
@@ -393,8 +413,19 @@ def main() -> None:
     parser.add_argument("--start", type=date.fromisoformat, default=START_DATE)
     parser.add_argument("--end", type=date.fromisoformat, default=END_DATE, help="Exclusive UTC end")
     parser.add_argument("--expiry", type=date.fromisoformat, default=EXPIRY_DATE)
+    parser.add_argument(
+        "--max-snapshots",
+        type=int,
+        default=None,
+        help="Оставить не больше указанного числа снимков, равномерно по времени",
+    )
     args = parser.parse_args()
-    print(json.dumps(prepare_quotes(args.dump, args.output, args.start, args.end, args.expiry), indent=2))
+    print(
+        json.dumps(
+            prepare_quotes(args.dump, args.output, args.start, args.end, args.expiry, args.max_snapshots),
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":
