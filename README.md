@@ -4,17 +4,19 @@
 
 | Путь | Что реализовано |
 | --- | --- |
-| `deribit_data/prepare_quotes.py` | Чтение SQL-дампа, исправление дат, отбор ATM-котировок на 25–35 дней и сохранение `quotes.csv` |
+| `deribit_data/prepare_quotes.py` | Чтение SQL-дампа, исправление дат, отбор ATM-котировок и сохранение `quotes.csv` |
 | `deribit_data/prepare_otc_trades.py` | Отбор OTC-сделок из годовой выгрузки или загрузка через API Deribit |
 | `deribit_data/proccess_snapshot.py` | Чтение снимка котировок, передача значений в расчёты, сохранение CSV, статистики и отчёта |
-| `deribit_data/pilot.py` | Пилот: фиксированный 20% holdout, квантили, интервалы и проверка block trades |
+| `deribit_data/pilot.py` | Рыночный holdout-тест, квантили IV и интервалы цен |
+| `deribit_data/readable_plots.py` | Графики интервалов и тестовых цен |
+| `deribit_data/otc_test.py` | Проверка OTC-сделок и построение графиков |
 | `option_pricing/inverse_call.py` | Цена обратного call-опциона в BTC и восстановление IV методом Брента |
 | `option_pricing/snapshot.py` | Расчёт IV набора котировок, фильтры и причины исключения |
 | `option_pricing/__init__.py` | Публичные импорты математических функций и классов |
 | `pyproject.toml` | Зависимости, состав пакетов и настройки линтера |
 | `datasets/` | Git LFS-указатель на архив исходного дампа и контрольная сумма |
 | `data/` | Локальные исходные данные и подготовленные таблицы `quotes.csv`, `otc_trades.csv` |
-| `results/` | Результаты расчёта IV: CSV, JSON со статистикой и Markdown-отчёт |
+| `results/` | Результаты расчётов и тестирования: CSV, JSON, отчёты и графики PNG |
 
 `deribit_data` отвечает за работу с данными. `option_pricing` выполняет расчёты
 в памяти и не зависит от файлов, API или `deribit_data`.
@@ -26,8 +28,7 @@
 ```bash
 python3 -m pip install -e .
 python3 -m deribit_data.prepare_quotes --max-snapshots 30
-python3 -m deribit_data.prepare_otc_trades --download
-python3 -m deribit_data.pilot
+python3 -m deribit_data.prepare_otc_trades
 python3 -m deribit_data.proccess_snapshot
 ```
 
@@ -40,35 +41,32 @@ python3 -m deribit_data.prepare_otc_trades --download
 ```
 
 По умолчанию подготовка выбирает 25 мая — 2 июня 2024 года включительно
-и экспирацию 28 июня 2024 года: это 25–35 дней до экспирации.
-`--max-snapshots 30` оставляет 30 снимков, равномерно распределённых по периоду.
+и экспирацию 28 июня 2024 года, срок до экспирации — 25–35 дней.
 Даты меняются через `--start`, `--end` (исключительная граница UTC) и `--expiry`.
 Расчёт IV обрабатывает один снимок дампа: последний по умолчанию или заданный
 через `--snapshot`. Параметры каждой команды доступны через `--help`.
 
-Если дамп лежит не в `data/dump.sql`, укажите его явно:
+## Тестирование модели
+
+После подготовки CSV:
 
 ```bash
-python3 -m deribit_data.prepare_quotes \
-  --dump datasets/dump_2024-11-09_00_46_57.sql.gz \
-  --max-snapshots 30
-```
-
-## Пилот на 30 снимках
-
-Текущий пилот использует экспирацию 28 июня 2024 и 30 снимков:
-
-```bash
-python3 -m deribit_data.prepare_quotes \
-  --dump datasets/dump_2024-11-09_00_46_57.sql.gz \
-  --output data/quotes.csv --max-snapshots 30
-python3 -m deribit_data.prepare_otc_trades \
-  --quotes data/quotes.csv --output data/otc_trades.csv --download
 python3 -m deribit_data.pilot
+python3 -m deribit_data.readable_plots
+python3 -m deribit_data.otc_test --strikes 65000 75000
 ```
 
-Результаты пилота сохраняются в `results/pilot/`: `holdout_intervals.csv`,
-`block_intervals.csv`, `metrics.json`, `report.md` и графики в `results/pilot/plots/`.
+Рыночный тест исключает фиксированные 20% контрактов из оценки квантилей IV
+и проверяет их `mid`. OTC-тест проверяет фактические цены сделок; страйки
+можно выбрать через `--strikes`. Основная метрика — Coverage, доля цен внутри
+интервала. Ширина интервала — разность верхней и нижней границ.
+
+Результаты сохраняются в `results/pilot/` и `results/otc/`: таблицы CSV,
+метрики JSON и графики PNG. Графики `readable_plots` — в подпапке
+`plots_readable/`. На OTC-графиках границы соседних снимков соединены прямыми;
+Coverage рассчитано по этому интерполированному интервалу. Такая проверка
+ретроспективна и использует оба соседних снимка. Проверка по последнему
+предшествующему снимку сохраняется отдельно в `otc_intervals.csv`.
 
 ## Исследовательский пайплайн
 

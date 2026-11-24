@@ -1,1 +1,0 @@
-trade_id,block_trade_id,trade_utc,snapshot_utc,instrument_name,strike_usd,price_btc,q05,q95,lower_price,upper_price,covered,width_btc,width_relative,peer_count,gap_seconds

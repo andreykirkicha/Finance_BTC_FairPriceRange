@@ -1,0 +1,87 @@
+{
+  "inputs": {
+    "quotes": "data/quotes.csv",
+    "otc": "data/otc_trades.csv",
+    "holdout": "results/pilot/holdout_assignments.csv"
+  },
+  "source_trade_rows": 104,
+  "selected_strikes": [
+    65000.0,
+    75000.0
+  ],
+  "package_counts": {
+    "single_leg_reported": 4,
+    "multiple_legs": 15
+  },
+  "method": {
+    "quantiles": [
+      0.05,
+      0.95
+    ],
+    "snapshot": "границы цены на снимках соединяются прямыми",
+    "plot_band": "непрерывная кусочно-линейная интерполяция ценовых границ по 30 снимкам",
+    "coverage": "проверяется интерполированный интервал на время OTC-сделки",
+    "interpretation": "ретроспективная интерполяция использует оба соседних снимка",
+    "snapshots_per_contract": {
+      "BTC-28JUN24-65000-C": 30,
+      "BTC-28JUN24-75000-C": 30
+    },
+    "price": "фактическая price_btc OTC-сделки, не mid",
+    "training": "исключены рыночные holdout-контракты и контракт OTC-сделки",
+    "otc_filters": "кроме явно выбранных страйков, дополнительных фильтров по дате, размеру и денежности нет",
+    "gap_minutes_min": 8.1887048,
+    "gap_minutes_max": 418.0266118166667
+  },
+  "iv": {
+    "input": 342,
+    "excluded": {},
+    "solved": 342
+  },
+  "counts": {
+    "trades": 19
+  },
+  "overall": {
+    "n": 19,
+    "inside": 13,
+    "outside": 6,
+    "coverage": 0.6842105263157895,
+    "mean_width_btc": 0.0023994641872007697,
+    "mean_width_relative": 0.06922191447872869
+  },
+  "previous_snapshot_overall": {
+    "n": 19,
+    "inside": 11,
+    "outside": 8,
+    "coverage": 0.5789473684210527,
+    "mean_width_btc": 0.0025166680215979306,
+    "mean_width_relative": 0.0724129125709202
+  },
+  "tables": {
+    "plot_intervals": "otc_interpolated_intervals.csv",
+    "previous_snapshot_intervals": "otc_intervals.csv"
+  },
+  "by_contract": {
+    "BTC-28JUN24-65000-C": {
+      "n": 4,
+      "inside": 2,
+      "outside": 2,
+      "coverage": 0.5,
+      "mean_width_btc": 0.0026040925522734307,
+      "mean_width_relative": 0.027834113497056966
+    },
+    "BTC-28JUN24-75000-C": {
+      "n": 15,
+      "inside": 11,
+      "outside": 4,
+      "coverage": 0.7333333333333333,
+      "mean_width_btc": 0.0023448966231813936,
+      "mean_width_relative": 0.0802586614071745
+    }
+  },
+  "plots": [
+    "plots/otc_intervals.png",
+    "plots/otc_BTC-28JUN24-65000-C.png",
+    "plots/otc_BTC-28JUN24-75000-C.png",
+    "plots/otc_all_strikes.png"
+  ]
+}
